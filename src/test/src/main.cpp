@@ -24,6 +24,9 @@
 #include <string.h>
 #include <string>
 #include <vector>
+#include <list>
+#include <cctype>
+#include <cmath>
 
 //#define _CRTDBG_MAP_ALLOC
 
@@ -114,12 +117,15 @@ struct Parameters {
 };
 bool LoadOFF(const string& fileName, vector<float>& points, vector<int>& triangles, IVHACD::IUserLogger& logger);
 bool LoadOBJ(const string& fileName, vector<float>& points, vector<int>& triangles, IVHACD::IUserLogger& logger);
+bool LoadSTL(const string& fileName, vector<float>& points, vector<int>& triangles, IVHACD::IUserLogger& logger);
 bool SaveOFF(const string& fileName, const float* const& points, const int* const& triangles, const unsigned int& nPoints,
     const unsigned int& nTriangles, IVHACD::IUserLogger& logger);
 bool SaveVRML2(ofstream& fout, const double* const& points, const int* const& triangles, const unsigned int& nPoints,
     const unsigned int& nTriangles, const Material& material, IVHACD::IUserLogger& logger);
 bool SaveOBJ(ofstream& fout, const double* const& points, const int* const& triangles, const unsigned int& nPoints,
     const unsigned int& nTriangles, const Material& material, IVHACD::IUserLogger& logger, int convexPart, int vertexOffset);
+bool SaveSTL(ofstream& fout, const double* const& points, const int* const& triangles, const unsigned int& nPoints,
+    const unsigned int& nTriangles, IVHACD::IUserLogger& logger, int convexPart);
 void GetFileExtension(const string& fileName, string& fileExtension);
 void ComputeRandomColor(Material& mat);
 void Usage(const Parameters& params);
@@ -207,6 +213,11 @@ int main(int argc, char* argv[])
                 return -1;
             }
         }
+        else if (fileExtension == ".STL") {
+            if (!LoadSTL(params.m_fileNameIn, points, triangles, myLogger)) {
+                return -1;
+            }
+        }
         else {
             myLogger.Log("Format not supported!\n");
             return -1;
@@ -235,7 +246,7 @@ int main(int argc, char* argv[])
                 ext = params.m_fileNameOut.substr(params.m_fileNameOut.length()-4);
             }
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            if (ext != ".obj") {
+            if (ext != ".obj" && ext != ".stl") {
                 // save output
                 unsigned int nConvexHulls = interfaceVHACD->GetNConvexHulls();
                 msg.str("");
@@ -254,6 +265,36 @@ int main(int argc, char* argv[])
                         myLogger.Log(msg.str().c_str());
                     }
                     foutCH.close();
+                }
+            }
+            else if (ext == ".stl")
+            {
+                unsigned int nConvexHulls = interfaceVHACD->GetNConvexHulls();
+                msg.str("");
+                msg << "+ Generate output: " << nConvexHulls << " convex-hulls " << endl;
+                myLogger.Log(msg.str().c_str());
+                IVHACD::ConvexHull ch;
+                if (params.m_fileNameOut.find('*') == string::npos)
+                {
+                    myLogger.Log("Could not find '*' in stl filename (did you try using quotation marks around the filename?)");
+                    return -1;
+                }
+                for (unsigned int p = 0; p < nConvexHulls; ++p)
+                {
+                    string outname(params.m_fileNameOut);
+                    char cp[100];
+                    sprintf(cp, "%d", p);
+                    outname.replace(outname.find('*'), 1, cp);
+                    ofstream foutCH(outname.c_str());
+                    if (foutCH.is_open())
+                    {
+                        interfaceVHACD->GetConvexHull(p, ch);
+                        SaveSTL(foutCH, ch.m_points, (const int *)ch.m_triangles, ch.m_nPoints, ch.m_nTriangles, myLogger, p);
+                        msg.str("");
+                        msg << "\t CH[" << setfill('0') << setw(5) << p << "] " << ch.m_nPoints << " V, " << ch.m_nTriangles << " T" << endl;
+                        myLogger.Log(msg.str().c_str());
+                    foutCH.close();
+                    }
                 }
             }
             else {
@@ -596,6 +637,399 @@ bool LoadOBJ(const string& fileName, vector<float>& points, vector<int>& triangl
     }
     return true;
 }
+char *nextword(char *str, char **next, IVHACD::IUserLogger& logger)
+{
+    char *start,*stop;
+
+    start = &str[strspn(str," \t\n\v\f\r")];
+    if (*start == '\0')
+        return NULL;
+
+    if (*start == '"' || *start == '\'')
+    {
+        stop = strchr(&start[1],*start);
+        if (!stop)
+        {
+            logger.Log("Unbalanced quotes in input line\n");
+            return NULL;
+        }
+        if (stop[1] && !isspace(stop[1]))
+        {
+            logger.Log("Input line quote not followed by whitespace\n");
+            return NULL;
+        }
+        start++;
+    }
+    else
+        stop = &start[strcspn(start," \t\n\v\f\r")];
+
+    if (*stop == '\0')
+        *next = NULL;
+    else
+        *next = stop+1;
+    *stop = '\0';
+    return start;
+}
+bool parse_line(char * line, char * copy, list<char *> &arg, unsigned int &narg, IVHACD::IUserLogger& logger)
+{
+    // duplicate line into copy string to break into words
+    strcpy(copy,line);
+
+    // strip any # comment by replacing it with 0
+    // do not strip # inside single/double quotes
+
+    char quote = '\0';
+    char *ptr = copy;
+    while (*ptr)
+    {
+        if (*ptr == '#' && !quote)
+        {
+            *ptr = '\0';
+            break;
+        }
+        if (*ptr == quote)
+            quote = '\0';
+        else if (*ptr == '"' || *ptr == '\'')
+            quote = *ptr;
+        ptr++;
+    }
+
+    // point arg[] at each subsequent arg in copy string
+    // nextword() inserts string terminators into copy string to delimit args
+    // nextword() treats text between single/double quotes as one arg
+
+    narg = 0;
+    ptr = copy;
+    char *next;
+
+    while (ptr)
+    {
+        char * nw = nextword(ptr, &next, logger);
+        if (!nw)
+            return false;
+        arg.push_back(nw);
+        narg++;
+        ptr = next;
+    }
+    return true;
+}
+bool meshtrifile_stl_binary(const string& fileName, vector<float>& points, vector<int>& triangles, IVHACD::IUserLogger& logger)
+{
+    unsigned int num_of_facets;
+    std::ifstream stl_file;
+
+    // open file for reading
+    stl_file.open(fileName.c_str(), std::ifstream::in | std::ifstream::binary);
+
+    // read 80 byte header into nirvana
+    for (int i=0; i<20; i++){
+      float dum;
+      stl_file.read((char *)&dum, sizeof(float));
+    }
+
+    // read number of triangles
+    stl_file.read((char *)&num_of_facets, sizeof(int));
+
+    unsigned int nverts = 0;
+    float tri_data[12];
+    double minDist = -1.0;
+    while(1) {
+        // read one triangle dataset (normal + 3 vertices)
+        for (int i=0; i<12; i++)
+          stl_file.read((char *)&tri_data[i], sizeof(float));
+        // read triangle attribute into nirvana
+        short dum;
+        stl_file.read((char *)&dum, sizeof(short));
+        // error handling
+        if (!stl_file)
+        {
+            logger.Log("Corrupt STL file: Error in reading binary STL file.\n");
+            return false;
+        }
+        // add triangle to mesh
+        // check if vertex is close to an existing one
+        int vi[3] = {-1,-1,-1};
+        for (int j = 0; j < 3; j++)
+        {
+            if (minDist < 0.)
+                minDist = ((tri_data[3+0]-tri_data[6+0])*(tri_data[3+0]-tri_data[6+0])+(tri_data[3+1]-tri_data[6+1])*(tri_data[3+1]-tri_data[6+1])+(tri_data[3+2]-tri_data[6+2])*(tri_data[3+2]-tri_data[6+2]))*1e-10;
+
+            bool found = false;
+            for (unsigned int k =0; k < nverts*3; k+=3)
+            {
+                const double lenSqr = (tri_data[3*j+3+0]-points[k])*(tri_data[3*j+3+0]-points[k])+(tri_data[3*j+3+1]-points[k+1])*(tri_data[3*j+3+1]-points[k+1])+(tri_data[3*j+3+2]-points[k+2])*(tri_data[3*j+3+2]-points[k+2]);
+                if (lenSqr < minDist)
+                {
+                    found = true;
+                    vi[j] = k/3;
+                    break;
+                }
+            }
+            if(!found)
+            {
+                points.push_back(tri_data[3*j+3+0]);
+                points.push_back(tri_data[3*j+3+1]);
+                points.push_back(tri_data[3*j+3+2]);
+                vi[j] = nverts;
+                nverts++;
+            }
+        }
+        triangles.push_back(vi[0]);
+        triangles.push_back(vi[1]);
+        triangles.push_back(vi[2]);
+
+        if (triangles.size() == num_of_facets*3)
+            break;
+    }
+
+    stl_file.close();
+    return true;
+}
+bool LoadSTL(const string& fileName, vector<float>& points, vector<int>& triangles, IVHACD::IUserLogger& logger)
+{
+    const unsigned int BufferSize = 1024;
+    FILE* fid = fopen(fileName.c_str(), "r");
+    if (!fid)
+    {
+        logger.Log("File not found\n");
+        return false;
+    }
+
+    unsigned int n, m;
+    int iVertex = 0;
+    double vertices[3][3];
+    bool insideSolidObject = false;
+    bool insideFacet = false;
+    bool insideOuterLoop = false;
+    double minDist = -1.0;
+
+    int nLines = 0;
+    char line[BufferSize], work[BufferSize];
+
+    int nverts = 0;
+    while (1)
+    {
+        // read a line from input script
+        // n = length of line including str terminator, 0 if end of file
+        // if line ends in continuation char '&', concatenate next line
+
+        m = 0;
+        while (1) {
+            if (BufferSize-m < 2)
+            {
+                logger.Log("BufferSize too small\n");
+                return false;
+            }
+            if (fgets(&line[m], BufferSize-m, fid) == NULL)
+            {
+                if (m)
+                    n = strlen(line) + 1;
+                else
+                    n = 0;
+                break;
+            }
+            m = strlen(line);
+            if (line[m-1] != '\n')
+                continue;
+
+            m--;
+            while (m >= 0 && isspace(line[m]))
+                m--;
+            if (m < 0 || line[m] != '&')
+            {
+                line[m+1] = '\0';
+                n = m+2;
+                break;
+            }
+        }
+
+        // if n = 0, end-of-file
+        // error if label_active is set, since label wasn't encountered
+        // if original input file, code is done
+        // else go back to previous input file
+
+        if (n == 0)
+            break;
+
+        if (n > BufferSize)
+        {
+            logger.Log("BufferSize too small\n");
+            return false;
+        }
+
+        // lines start with 1 (not 0)
+        nLines++;
+
+        unsigned int narg = 0;
+        list<char *> arg;
+        bool success = parse_line(line, work, arg, narg, logger);
+        if (!success)
+        {
+            logger.Log("Could not parse STL file\n");
+            return false;
+        }
+
+        // skip empty lines
+        if(narg==0)
+        {
+            logger.Log("Note: Skipping empty line in STL file\n");
+            continue;
+        }
+
+        char *firstWord = *(arg.begin());
+        if (strcmp(firstWord,"solid") != 0 && nLines == 1)
+        {
+            fclose(fid);
+            logger.Log("Note: solid keyword not found, assuming binary stl file\n");
+            fid = NULL;
+            return meshtrifile_stl_binary(fileName, points, triangles, logger);
+        }
+
+        // detect begin and end of a solid object, facet and vertices
+        if (strcmp(firstWord,"solid") == 0)
+        {
+            if (insideSolidObject)
+            {
+                logger.Log("Corrupt or unknown STL file: New solid object begins without closing prior solid object.\n");
+                return false;
+            }
+            insideSolidObject=true;
+        }
+        else if (strcmp(firstWord,"endsolid") == 0)
+        {
+            if (!insideSolidObject)
+            {
+                logger.Log("Corrupt or unknown STL file: End of solid object found, but no begin.\n");
+                return false;
+            }
+            insideSolidObject=false;
+        }
+        // detect begin and end of a facet within a solids object
+        else if (strcmp(firstWord,"facet") == 0)
+        {
+            if (insideFacet)
+            {
+                logger.Log("Corrupt or unknown STL file: New facet begins without closing prior facet.\n");
+                return false;
+            }
+            if (!insideSolidObject)
+            {
+                logger.Log("Corrupt or unknown STL file: New facet begins outside solid object.\n");
+                return false;
+            }
+            insideFacet = true;
+
+            // check for keyword normal belonging to facet
+            list<char*>::iterator it = arg.begin();
+            it++;
+            if (strcmp(*it,"normal") != 0)
+            {
+                logger.Log("Corrupt or unknown STL file: Facet normal not defined.\n");
+                return false;
+            }
+            // do not import facet normal (is calculated later)
+        }
+        else if (strcmp(firstWord,"endfacet") == 0)
+        {
+            if (!insideFacet)
+            {
+                logger.Log("Corrupt or unknown STL file: End of facet found, but no begin.\n");
+                return false;
+            }
+            insideFacet = false;
+            if (iVertex != 3)
+            {
+                logger.Log("Corrupt or unknown STL file: Number of vertices not equal to three (no triangle).\n");
+                return false;
+            }
+
+            // add triangle to mesh
+            // check if vertex is close to an existing one
+            int vi[3] = {-1,-1,-1};
+            for (int j = 0; j < 3; j++)
+            {
+                if (minDist < 0.)
+                {
+                    minDist = ((vertices[0][0]-vertices[1][0])*(vertices[0][0]-vertices[1][0])+(vertices[0][1]-vertices[1][1])*(vertices[0][1]-vertices[1][1])+(vertices[0][2]-vertices[1][2])*(vertices[0][2]-vertices[1][2]))*1e-10;
+                }
+
+                bool found = false;
+                for (int k =0; k < nverts*3; k+=3)
+                {
+                    const double lenSqr = (vertices[j][0]-points[k])*(vertices[j][0]-points[k])+(vertices[j][1]-points[k+1])*(vertices[j][1]-points[k+1])+(vertices[j][2]-points[k+2])*(vertices[j][2]-points[k+2]);
+                    if (lenSqr < minDist)
+                    {
+                        found = true;
+                        vi[j] = k/3;
+                        break;
+                    }
+                }
+                if(!found)
+                {
+                    points.push_back(vertices[j][0]);
+                    points.push_back(vertices[j][1]);
+                    points.push_back(vertices[j][2]);
+                    vi[j] = nverts;
+                    nverts++;
+                }
+            }
+            triangles.push_back(vi[0]);
+            triangles.push_back(vi[1]);
+            triangles.push_back(vi[2]);
+        }
+        //detect begin and end of an outer loop within a facet
+        else if (strcmp(firstWord,"outer") == 0)
+        {
+            if (insideOuterLoop)
+            {
+                logger.Log("Corrupt or unknown STL file: New outer loop begins without closing prior outer loop.\n");
+                return false;
+            }
+            if (!insideFacet)
+            {
+                logger.Log("Corrupt or unknown STL file: New outer loop begins outside facet.\n");
+                return false;
+            }
+            insideOuterLoop = true;
+            iVertex = 0;
+        }
+        else if (strcmp(firstWord,"endloop") == 0)
+        {
+            if (!insideOuterLoop)
+            {
+                logger.Log("Corrupt or unknown STL file: End of outer loop found, but no begin.\n");
+                return false;
+            }
+            insideOuterLoop=false;
+        }
+
+        else if (strcmp(firstWord,"vertex") == 0)
+        {
+            if (!insideOuterLoop)
+            {
+                logger.Log("Corrupt or unknown STL file: Vertex found outside a loop.\n");
+                return false;
+            }
+
+            // read the vertex
+            list<char*>::iterator it = arg.begin();
+            for (int j=0; j<3; j++)
+            {
+                it++;
+                vertices[iVertex][j]=atof(*it);
+            }
+
+            iVertex++;
+            if (iVertex > 3)
+            {
+                logger.Log("Corrupt or unknown STL file: Can not have more than 3 vertices "
+                           "in a facet (only triangular meshes supported).\n");
+                return false;
+            }
+        }
+    }
+    return true;
+}
 bool SaveOFF(const string& fileName, const float* const& points, const int* const& triangles, const unsigned int& nPoints,
     const unsigned int& nTriangles, IVHACD::IUserLogger& logger)
 {
@@ -719,6 +1153,52 @@ bool SaveOBJ(ofstream& fout, const double* const& points, const int* const& tria
                      << triangles[f + 2]+vertexOffset << " " << std::endl;
             }
         }
+        return true;
+    }
+    else {
+        logger.Log("Can't open file\n");
+        return false;
+    }
+}
+
+bool SaveSTL(ofstream& fout, const double* const& points, const int* const& triangles, const unsigned int& nPoints,
+    const unsigned int& nTriangles, IVHACD::IUserLogger& logger, int convexPart)
+{
+    if (fout.is_open())
+    {
+        // write spaces int header
+        char space = ' ';
+        for (unsigned int i = 0; i < 80; i++)
+            fout.write(&space, sizeof(char));
+
+        fout.write((char *)&nTriangles, sizeof(int));
+
+        for (unsigned int i = 0; i < nTriangles; i++)
+        {
+            float v[9];
+            for (unsigned int j = 0; j < 3; j++)
+            {
+                v[3*j+0] = points[3*triangles[3*i+j]+0];
+                v[3*j+1] = points[3*triangles[3*i+j]+1];
+                v[3*j+2] = points[3*triangles[3*i+j]+2];
+            }
+            float n[3] = {0., 0., 0.};
+            n[0] = (v[0+1]-v[6+1])*(v[3+2]-v[6+2])-(v[0+2]-v[6+2])*(v[3+1]-v[6+1]);
+            n[1] = (v[0+2]-v[6+2])*(v[3+0]-v[6+0])-(v[0+0]-v[6+0])*(v[3+2]-v[6+2]);
+            n[2] = (v[0+0]-v[6+0])*(v[3+1]-v[6+1])-(v[0+1]-v[6+1])*(v[3+0]-v[6+0]);
+            const float invLen = 1.0/sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]);
+            n[0] *= invLen;
+            n[1] *= invLen;
+            n[2] *= invLen;
+            // write normal
+            fout.write((char*)n, 3*sizeof(float));
+            // write vertex data
+            fout.write((char*)v, 9*sizeof(float));
+            // write attribute
+            short dum = 0;
+            fout.write((char*)&dum, sizeof(short));
+        }
+
         return true;
     }
     else {
