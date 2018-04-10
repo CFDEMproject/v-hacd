@@ -345,11 +345,11 @@ void Usage(const Parameters& params)
 {
     std::ostringstream msg;
     msg << "V-HACD V" << VHACD_VERSION_MAJOR << "." << VHACD_VERSION_MINOR << endl;
-    msg << "Syntax: testVHACD [options] --input infile.obj --output outfile.wrl --log logfile.txt" << endl
+    msg << "Syntax: testVHACD [options] --input infile.ext --output outfile.ext --log logfile.txt" << endl
         << endl;
     msg << "Options:" << endl;
-    msg << "       --input                     Wavefront .obj input file name" << endl;
-    msg << "       --output                    VRML 2.0 output file name" << endl;
+    msg << "       --input                     Wavefront (.obj) or STL (.stl) input file name" << endl;
+    msg << "       --output                    VRML 2.0 (.wrl) or multiple STL (*.stl, e.g. test_*.stl) output file name" << endl;
     msg << "       --log                       Log file name" << endl;
     msg << "       --resolution                Maximum number of voxels generated during the voxelization stage (default=100,000, range=10,000-16,000,000)" << endl;
     msg << "       --maxhulls                  Maximum number of convex hulls to produce." << endl;
